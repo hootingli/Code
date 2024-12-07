@@ -12,7 +12,7 @@ class ResLinearBlock(nn.Module):
             # nn.BatchNorm1d(hidden_features)
             nn.LayerNorm(hidden_features)
         )
-        self.hidden_layers = nn.ModuleList([
+        self.hidden_layers = nn.Sequential(*[
             nn.Sequential(
                 nn.Linear(hidden_features, hidden_features, bias=bias),
                 nn.ReLU(),
@@ -33,10 +33,11 @@ class ResLinearBlock(nn.Module):
 
     def forward(self, x):
         x1 = self.input_layer(x)
-        for layer in self.hidden_layers:
-            x1 = layer(x1)
+        x1 = self.hidden_layers(x1)
         x1 = self.output_layer(x1)
-        return x1 + x[:, :self.out_features]
+        if self.in_features != self.out_features:
+            x = x[:, :self.out_features]
+        return x1 + x
     
 class ResVariationalAutoEncoder(nn.Module):
     def __init__(self, input_dim, h_dim=200, h_layers=[2,2], z_dim=2):
@@ -48,7 +49,7 @@ class ResVariationalAutoEncoder(nn.Module):
             # nn.BatchNorm1d(h_dim)
             # nn.LayerNorm(h_dim)
         )
-        self.encoder_layers = nn.ModuleList([
+        self.encoder_layers = nn.Sequential(*[
             ResLinearBlock(h_dim, h_dim, h_dim, repeat=repeat)
             for repeat in h_layers
         ])
@@ -62,7 +63,7 @@ class ResVariationalAutoEncoder(nn.Module):
             # nn.BatchNorm1d(h_dim)
             # nn.LayerNorm(h_dim)
         )
-        self.decoder_layers = nn.ModuleList([
+        self.decoder_layers = nn.Sequential(*[
             ResLinearBlock(h_dim, h_dim, h_dim, repeat=repeat)
             for repeat in h_layers
         ])
@@ -78,35 +79,35 @@ class ResVariationalAutoEncoder(nn.Module):
         self.std = nn.Parameter(torch.tensor(1.014383), requires_grad=True)
 
     def encode(self, x):
-        h = self.img2hid(x)
-        for layer in self.encoder_layers:
-            h = layer(h)
-        mu, log_var = self.hid2mu(h), self.hid2log_var(h)
+        x = self.img2hid(x)
+        x = self.encoder_layers(x)
+        mu = self.hid2mu(x)
+        log_var = self.hid2log_var(x)
         return mu, log_var
 
     def decode(self, z, eps=1e-8):
-        #p_theta(x|z)
-        h = self.z2hid(z)
-        for layer in self.decoder_layers:
-            h = layer(h)
-        h = self.hid2img(h)
+        x = self.z2hid(z)
+        x = self.decoder_layers(x)
+        x = self.hid2img(x)
         # h = (h - h.mean()) / h.std()
         # h = h * self.std + self.mean
-        return h
-        #return torch.tanh(self.hid_2img(h))
-        #return self.hid_2img(h)  # No activation
+        return x
 
     def forward(self, x):
         mu, log_var = self.encode(x)
-        x_reconstructed = self.generate(mu, log_var)
-        return x_reconstructed, mu, log_var
+        z = self.sample(mu, log_var)
+        x = self.decode(z)
+        return x, mu, log_var
     
-    def generate(self, mu, log_var):
+    def sample(self, mu, log_var):
         sigma = log_var.exp().sqrt()
         epsilon = torch.randn_like(sigma)
-        z_reparametrized = mu + sigma * epsilon
-        x_reconstructed = self.decode(z_reparametrized)
-        return x_reconstructed
+        z = mu + sigma * epsilon
+        return z
+    
+    def generate(self, z):
+        x = self.decode(z)
+        return x
     
     def reconstruct(self, h, eps=1e-8):
         h = 1 / (torch.exp(h)+eps)
@@ -138,3 +139,9 @@ class ResVariationalAutoEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
                 except:
                     pass
+                
+if __name__ == '__main__':
+    from torchsummary import summary
+    model = ResVariationalAutoEncoder(100, h_dim=1000, h_layers=[1], z_dim=2)
+    summary(model, (100,), device='cpu')
+    
