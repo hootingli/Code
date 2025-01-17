@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
 from torch import nn, optim
-from model import VariationalAutoEncoder  # Assuming you have a VAE model defined in 'model.py'
+from models.VAE import VariationalAutoEncoder  # Assuming you have a VAE model defined in 'model.py'
 from torch.utils.data import TensorDataset, DataLoader
 import pandas as pd
 import numpy as np

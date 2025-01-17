@@ -4,8 +4,10 @@ GAN
 hbs
 *.pth
 *.mat
+# !preprocessed.mat
 hbs.zip
 .DS_Store
 *.pyc
 .python-version
 .ipynb_checkpoints
+data/MNIST

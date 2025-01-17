@@ -1,26 +1,30 @@
-import torch
-from torch import optim
-from ResVAE import ResVariationalAutoEncoder  # Assuming you have a VAE model defined in 'model.py'
-from torch.utils.data import TensorDataset, DataLoader
 import h5py
 import numpy as np
+import torch
+from torch import optim
+from torch.utils import data
+from torch.utils.data import DataLoader, TensorDataset
+
+from models.ResVAE import ResVariationalAutoEncoder
 
 # Configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MAT_PATH = 'data/preprocessed.mat'
+MODEL_SAVE_PATH = 'checkpoints/ResVAE.pth'
+SEED = 717
+
 INPUT_DIM = 100  # Adjusted input dimension to match your complex data
-H_DIM = 32
-H_LAYERS = [2,2,2]
-Z_DIM = 16
-NUM_EPOCHS = 5000
+H_DIM = 2000
+Z_DIM = 4
+H_LAYERS = [2]
+
+NUM_EPOCHS = 20000
 BATCH_SIZE = 1024 # Adjusted batch size
-LR_RATE = 1e-3
+LR_RATE = 1e-4
+KL_RATE = 0.1
 
-# Load the dataset to a 777x4x1000 data called conformalWeldings
-# Load the .mat file
-#with h5py.File('./VAE/preprocessed2.mat', 'r') as mat_file:
+torch.manual_seed(SEED)
 
-#with h5py.File('./VAE/preprocessed_normalized.mat', 'r') as mat_file:
-MAT_PATH = '../data/preprocessed.mat'
 
 def load_cw(mat_path):
     with h5py.File(mat_path, 'r') as mat_file:
@@ -44,56 +48,80 @@ def load_cw(mat_path):
             conformalWeldings[i] = np.log(1/theta) # Correspond theta and bias together
     return conformalWeldings
 
-# Assuming you have your 777x2x1000 data stored in a NumPy array named 'conformalWeldings'
-#conformalWeldings = conformalWeldings[:10, :, :]
 
-def main():
+def get_kl_rate(epoch, n=500, m=1000):
+    if epoch < m:
+        return 0
+    else:
+        return (epoch % n) / n
+
+def train(is_load=False):
     cw = load_cw(MAT_PATH)
     cw_tensor = torch.tensor(cw).to(DEVICE)
 
     train_data = TensorDataset(cw_tensor)
-    train_loader = DataLoader(dataset=train_data, batch_size=BATCH_SIZE, shuffle=True)
+    train_loader = DataLoader(
+        dataset=train_data, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True
+        )
 
     
-    model = ResVariationalAutoEncoder(input_dim=INPUT_DIM, h_dim=H_DIM, h_layers=H_LAYERS, z_dim=Z_DIM).to(DEVICE)
-    optimizer = optim.Adam(model.parameters(), lr=LR_RATE, weight_decay=1e-5, betas=(0.9, 0.999))
+    model = ResVariationalAutoEncoder(
+        input_dim=INPUT_DIM,
+        h_dim=H_DIM, 
+        h_layers=H_LAYERS, 
+        z_dim=Z_DIM
+        ).to(DEVICE)
+
+    ## Load model
+    if is_load:
+        model = torch.load(MODEL_SAVE_PATH)
+    
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=LR_RATE, 
+        weight_decay=1e-5, 
+        betas=(0.5, 0.999)
+        )
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=[8000], 
+        gamma=0.5
+        )
 
     model.to(DEVICE)
-    kl_rate = 0.01
-    
-    # Start Training
-    model.train()
     
     loader_size = len(train_loader)
-    loss_list = np.zeros(loader_size)  # To store reconstruction diff losses
-    recon_loss_list = np.zeros(loader_size)  # To store reconstruction losses
-    kl_loss_list = np.zeros(loader_size)         # To store KL divergence losses
+    loss_list_dict = {}
+
+    # Start Training
+    model.train()
 
     for epoch in range(NUM_EPOCHS):
-        for i, [cw] in enumerate(train_loader):
-            cw = cw.to(DEVICE, dtype=torch.float32).view(cw.shape[0], INPUT_DIM)
-            x_reconstructed, mu, log_var = model(cw)
+        for i, [data] in enumerate(train_loader):
+            data = data.to(DEVICE, dtype=torch.float32).view(data.shape[0], INPUT_DIM)
+            x_reconstructed, mu, log_var = model(data)
 
             # Compute loss
-            loss, recon_loss, kl_loss = model.loss(x_reconstructed, cw, mu, log_var, kl_rate)
+            # kl_rate = get_kl_rate(epoch)
+            kl_rate = KL_RATE
+            loss_dict = model.loss(x_reconstructed, data, mu, log_var, kl_rate)
 
             # Backprop
             optimizer.zero_grad()
-            loss.backward()
+            loss_dict["loss"].backward()
             optimizer.step()
-            
+            scheduler.step()
+
             # Append losses to the lists
-            loss_list[i] = loss.item()
-            recon_loss_list[i] = recon_loss.item()
-            kl_loss_list[i] = kl_loss.item()
+            for k, v in loss_dict.items():
+                if k not in loss_list_dict:
+                    loss_list_dict[k] = np.zeros(loader_size)
+                loss_list_dict[k][i] = v.item()
 
-        # Calculate and print average losses for this epoch
-        avg_loss = loss_list.mean()
-        avg_recon_loss = recon_loss_list.mean()
-        avg_kl_loss = kl_loss_list.mean()
-
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch}/{NUM_EPOCHS} | Loss: {avg_loss:.4f}, Reconstruction: {avg_recon_loss:.4f}, KL: {avg_kl_loss:.4f}")
-            
         if epoch % 100 == 0:
-            torch.save(model, './VAE_theta+bias1.pth')
+            print(f"Epoch {epoch}/{NUM_EPOCHS} | {', '.join([f'{k}: {v.mean():.4f}' for k, v in loss_list_dict.items()])}")
+            
+        if epoch % 1000 == 0:
+            torch.save(model, MODEL_SAVE_PATH)
